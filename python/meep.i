@@ -557,6 +557,48 @@ kpoint_list get_eigenmode_coefficients_and_kpoints(meep::fields *f, meep::dft_fl
     return res;
 }
 
+kpoint_list get_eigenmode_coefficients_and_kpoints_multi_dp(
+    meep::fields *f, meep::dft_flux flux, const meep::volume &eig_vol,
+    PyObject *dp_list, int parity, double eig_resolution,
+    double eigensolver_tol, std::complex<double> *coeffs,
+    double *vgrp, meep::kpoint_func user_kpoint_func,
+    void *user_kpoint_data, double *cscale, meep::direction d) {
+
+    if (!PyList_Check(dp_list))
+        meep::abort("dp_list must be a list of diffractedplanewave objects");
+
+    int num_dps = (int)PyList_Size(dp_list);
+    meep::diffractedplanewave *dps = new meep::diffractedplanewave[num_dps];
+
+    for (int i = 0; i < num_dps; i++) {
+        PyObject *item = PyList_GetItem(dp_list, i);
+        void *ptr = 0;
+        int res = SWIG_ConvertPtr(item, &ptr, SWIGTYPE_p_meep__diffractedplanewave, 0);
+        if (!SWIG_IsOK(res)) {
+            delete[] dps;
+            meep::abort("dp_list[%d] is not a diffractedplanewave object", i);
+        }
+        meep::diffractedplanewave *dp_ptr = reinterpret_cast<meep::diffractedplanewave *>(ptr);
+        // Copy construct into our array
+        int g_copy[3] = {dp_ptr->get_g()[0], dp_ptr->get_g()[1], dp_ptr->get_g()[2]};
+        double axis_copy[3] = {dp_ptr->get_axis()[0], dp_ptr->get_axis()[1], dp_ptr->get_axis()[2]};
+        dps[i] = meep::diffractedplanewave(g_copy, axis_copy, dp_ptr->get_s(), dp_ptr->get_p());
+    }
+
+    size_t num_kpoints = num_dps * flux.freq.size();
+    meep::vec *kpoints = new meep::vec[num_kpoints];
+    meep::vec *kdom = new meep::vec[num_kpoints];
+
+    f->get_eigenmode_coefficients_multi_dp(flux, eig_vol, dps, num_dps, parity, eig_resolution,
+                                            eigensolver_tol, coeffs, vgrp, user_kpoint_func,
+                                            user_kpoint_data, kpoints, kdom, cscale, d);
+
+    delete[] dps;
+
+    kpoint_list result = {kpoints, num_kpoints, kdom, num_kpoints};
+    return result;
+}
+
 PyObject *_get_array_slice_dimensions(meep::fields *f, const meep::volume &where, size_t dims[3],
                                       bool collapse_empty_dimensions, bool snap_empty_dimensions,
                                       meep::component cgrid = Centered, PyObject *min_max_loc = NULL) {
@@ -1664,6 +1706,13 @@ kpoint_list get_eigenmode_coefficients_and_kpoints(meep::fields *f, meep::dft_fl
                                                    double *cscale, meep::direction d);
 kpoint_list get_eigenmode_coefficients_and_kpoints(meep::fields *f, meep::dft_flux flux,
                                                    const meep::volume &eig_vol, meep::diffractedplanewave dp,
+                                                   int parity, double eig_resolution, double eigensolver_tol,
+                                                   std::complex<double> *coeffs, double *vgrp,
+                                                   meep::kpoint_func user_kpoint_func, void *user_kpoint_data,
+                                                   double *cscale, meep::direction d);
+kpoint_list get_eigenmode_coefficients_and_kpoints_multi_dp(
+                                                   meep::fields *f, meep::dft_flux flux,
+                                                   const meep::volume &eig_vol, PyObject *dp_list,
                                                    int parity, double eig_resolution, double eigensolver_tol,
                                                    std::complex<double> *coeffs, double *vgrp,
                                                    meep::kpoint_func user_kpoint_func, void *user_kpoint_data,

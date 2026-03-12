@@ -332,7 +332,7 @@ void special_kz_phasefix(eigenmode_data *edata, bool phase_flip) {
 void *fields::get_eigenmode(double frequency, direction d, const volume where, const volume eig_vol,
                             int band_num, const vec &_kpoint, bool match_frequency, int parity,
                             double resolution, double eigensolver_tol, double *kdom,
-                            void **user_mdata, diffractedplanewave *dp) {
+                            void **user_mdata, diffractedplanewave *dp, bool skip_phase_fix) {
   /*--------------------------------------------------------------*/
   /*- part 1: preliminary setup for calling MPB  -----------------*/
   /*--------------------------------------------------------------*/
@@ -723,8 +723,11 @@ void *fields::get_eigenmode(double frequency, direction d, const volume where, c
 
   maxwell_compute_h_from_H(mdata, H, (scalar_complex *)cdata, band_num - 1, 1);
   /* choose deterministic phase, maximizing power in real part;
-     see fix_field_phase routine in MPB.*/
-  {
+     see fix_field_phase routine in MPB.
+     For DiffractedPlanewave mode decomposition we can skip this because
+     |alpha|^2 is phase-invariant: the mode-mode self-overlap normfac
+     cancels out any global phase factor. */
+  if (!skip_phase_fix) {
     int i, N = mdata->fft_output_size * 3;
     double sq_sum0 = 0, sq_sum1 = 0, maxabs = 0.0;
     double theta;
@@ -1013,6 +1016,73 @@ void fields::get_eigenmode_coefficients(dft_flux flux, const volume &eig_vol, in
   destroy_maxwell_data(mdata);
 }
 
+/***************************************************************/
+/* Batched version for multiple DiffractedPlanewave objects.    */
+/* Creates maxwell_data once and reuses it across all orders,  */
+/* giving identical results to calling get_eigenmode_coefficients*/
+/* separately for each order but much faster.                   */
+/***************************************************************/
+void fields::get_eigenmode_coefficients_multi_dp(dft_flux flux, const volume &eig_vol,
+                                                 diffractedplanewave *dps, int num_dps, int parity,
+                                                 double eig_resolution, double eigensolver_tol,
+                                                 std::complex<double> *coeffs, double *vgrp,
+                                                 kpoint_func user_kpoint_func,
+                                                 void *user_kpoint_data, vec *kpoints,
+                                                 vec *kdom_list, double *cscale, direction d) {
+  adjust_mpb_verbosity amv;
+  int num_freqs = flux.freq.size();
+  bool match_frequency = true;
+  if (flux.use_symmetry && S.multiplicity() > 1 && parity == 0)
+    meep::abort("flux regions for eigenmode projection with symmetry should be created by "
+                "add_mode_monitor()");
+
+  // Create maxwell_data ONCE and reuse across all orders and frequencies.
+  maxwell_data *mdata = NULL;
+
+  for (int nb = 0; nb < num_dps; nb++) {
+    vec kpoint(0.0, 0.0, 0.0);
+    for (int nf = 0; nf < num_freqs; nf++) {
+      double kdom[3];
+      if (user_kpoint_func) kpoint = user_kpoint_func(flux.freq[nf], 1, user_kpoint_data);
+      am_now_working_on(MPBTime);
+      void *mode_data = get_eigenmode(flux.freq[nf], d, flux.where, eig_vol, 1, kpoint,
+                                      match_frequency, parity, eig_resolution, eigensolver_tol,
+                                      kdom, (void **)&mdata, &dps[nb], true /* skip_phase_fix */);
+      finished_working();
+      if (!mode_data) { // mode not found, assume evanescent
+        coeffs[2 * nb * num_freqs + 2 * nf] = coeffs[2 * nb * num_freqs + 2 * nf + 1] = 0;
+        if (vgrp) vgrp[nb * num_freqs + nf] = 0;
+        if (kpoints) kpoints[nb * num_freqs + nf] = vec(0.0, 0.0, 0.0);
+        if (kdom_list) kdom_list[nb * num_freqs + nf] = vec(0.0, 0.0, 0.0);
+        continue;
+      }
+
+      if (is_real && beta != 0)
+        special_kz_phasefix((eigenmode_data *)mode_data, false /* phase_flip */);
+
+      double vg = get_group_velocity(mode_data);
+      vec kfound = get_k(mode_data);
+      if (vgrp) vgrp[nb * num_freqs + nf] = vg;
+      if (kpoints) kpoints[nb * num_freqs + nf] = kfound;
+      if (kdom_list) kdom_list[nb * num_freqs + nf] = vec(kdom[0], kdom[1], kdom[2]);
+
+      complex<double> mode_flux[2], mode_mode[2];
+      get_mode_flux_overlap(mode_data, flux, nf, mode_flux);
+      get_mode_mode_overlap(mode_data, mode_data, flux, mode_mode);
+      complex<double> cplus = 0.5 * (mode_flux[0] + mode_flux[1]);
+      complex<double> cminus = 0.5 * (mode_flux[0] - mode_flux[1]);
+      complex<double> normfac = 0.5 * (mode_mode[0] + mode_mode[1]);
+      if (normfac == 0.0) normfac = 1.0;
+      double csc = sqrt((flux.use_symmetry ? S.multiplicity() : 1.0) / abs(normfac));
+      if (cscale) cscale[nb * num_freqs + nf] = csc;
+      coeffs[2 * nb * num_freqs + 2 * nf + (vg > 0.0 ? 0 : 1)] = cplus * csc;
+      coeffs[2 * nb * num_freqs + 2 * nf + (vg > 0.0 ? 1 : 0)] = cminus * csc;
+      destroy_eigenmode_data((void *)mode_data, false);
+    }
+  }
+  destroy_maxwell_data(mdata);
+}
+
 /**************************************************************/
 /* dummy versions of class methods for compiling without MPB  */
 /**************************************************************/
@@ -1020,7 +1090,7 @@ void fields::get_eigenmode_coefficients(dft_flux flux, const volume &eig_vol, in
 void *fields::get_eigenmode(double frequency, direction d, const volume where, const volume eig_vol,
                             int band_num, const vec &kpoint, bool match_frequency, int parity,
                             double resolution, double eigensolver_tol, double *kdom,
-                            void **user_mdata, diffractedplanewave *dp) {
+                            void **user_mdata, diffractedplanewave *dp, bool skip_phase_fix) {
 
   (void)frequency;
   (void)d;
@@ -1083,6 +1153,31 @@ void fields::get_eigenmode_coefficients(dft_flux flux, const volume &eig_vol, in
   (void)d;
   (void)dp;
   meep::abort("Meep must be configured/compiled with MPB for get_eigenmode_coefficients");
+}
+
+void fields::get_eigenmode_coefficients_multi_dp(dft_flux flux, const volume &eig_vol,
+                                                 diffractedplanewave *dps, int num_dps, int parity,
+                                                 double eig_resolution, double eigensolver_tol,
+                                                 std::complex<double> *coeffs, double *vgrp,
+                                                 kpoint_func user_kpoint_func,
+                                                 void *user_kpoint_data, vec *kpoints,
+                                                 vec *kdom_list, double *cscale, direction d) {
+  (void)flux;
+  (void)eig_vol;
+  (void)dps;
+  (void)num_dps;
+  (void)parity;
+  (void)eig_resolution;
+  (void)eigensolver_tol;
+  (void)coeffs;
+  (void)vgrp;
+  (void)kpoints;
+  (void)user_kpoint_func;
+  (void)user_kpoint_data;
+  (void)kdom_list;
+  (void)cscale;
+  (void)d;
+  meep::abort("Meep must be configured/compiled with MPB for get_eigenmode_coefficients_multi_dp");
 }
 
 void destroy_eigenmode_data(void *vedata, bool destroy_mdata) {

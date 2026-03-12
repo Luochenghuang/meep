@@ -375,6 +375,45 @@ class TestEigCoeffs(unittest.TestCase):
         self.assertAlmostEqual(Tsum, Tflux, places=2)
         self.assertAlmostEqual(Rsum + Tsum, 1.00, places=2)
 
+        # Verify batched get_eigenmode_coefficients_multi produces
+        # the same |alpha|^2 as the per-order loop above.
+        tran_dp_list = []
+        for nm in range(nm_t):
+            for S_pol in [False, True]:
+                tran_dp_list.append(
+                    mp.DiffractedPlanewave(
+                        [0, nm, 0],
+                        mp.Vector3(1, 0, 0),
+                        1 if S_pol else 0,
+                        0 if S_pol else 1,
+                    )
+                )
+
+        res_batch = sim.get_eigenmode_coefficients_multi(tran_flux, tran_dp_list)
+
+        idx = 0
+        for nm in range(nm_t):
+            for S_pol in [False, True]:
+                res_single = sim.get_eigenmode_coefficients(
+                    tran_flux,
+                    mp.DiffractedPlanewave(
+                        [0, nm, 0],
+                        mp.Vector3(1, 0, 0),
+                        1 if S_pol else 0,
+                        0 if S_pol else 1,
+                    ),
+                )
+                power_single = abs(res_single.alpha[0, 0, 0]) ** 2
+                power_batch = abs(res_batch.alpha[idx, 0, 0]) ** 2
+                self.assertAlmostEqual(
+                    power_batch / max(power_single, 1e-30),
+                    1.0,
+                    places=5,
+                    msg=f"batch/single mismatch for order {nm}, "
+                    f"{'S' if S_pol else 'P'}-pol",
+                )
+                idx += 1
+
 
 if __name__ == "__main__":
     unittest.main()

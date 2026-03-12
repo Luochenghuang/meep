@@ -2077,15 +2077,20 @@ class Simulation:
             absorbers,
             self.extra_materials,
             self.split_chunks_evenly,
-            False
-            if self.chunk_layout
-            and not isinstance(self.chunk_layout, mp.BinaryPartition)
-            else True,
+            (
+                False
+                if self.chunk_layout
+                and not isinstance(self.chunk_layout, mp.BinaryPartition)
+                else True
+            ),
             None,
             True if self._output_stats is not None else False,
-            self.chunk_layout
-            if self.chunk_layout and isinstance(self.chunk_layout, mp.BinaryPartition)
-            else None,
+            (
+                self.chunk_layout
+                if self.chunk_layout
+                and isinstance(self.chunk_layout, mp.BinaryPartition)
+                else None
+            ),
         )
         self.geps = mp._set_materials(
             self.structure,
@@ -2897,17 +2902,21 @@ class Simulation:
         pts = [s.center for s in self.sources]
 
         src_freqs_min = min(
-            s.src.frequency - 1 / s.src.width / 2
-            if isinstance(s.src, mp.GaussianSource)
-            else mp.inf
+            (
+                s.src.frequency - 1 / s.src.width / 2
+                if isinstance(s.src, mp.GaussianSource)
+                else mp.inf
+            )
             for s in self.sources
         )
         fmin = max(0, src_freqs_min)
 
         fmax = max(
-            s.src.frequency + 1 / s.src.width / 2
-            if isinstance(s.src, mp.GaussianSource)
-            else 0
+            (
+                s.src.frequency + 1 / s.src.width / 2
+                if isinstance(s.src, mp.GaussianSource)
+                else 0
+            )
             for s in self.sources
         )
 
@@ -4235,6 +4244,67 @@ class Simulation:
             raise TypeError(
                 "get_eigenmode_coefficients: bands must be either a list or DiffractedPlanewave object"
             )
+
+        return EigCoeffsResult(
+            np.reshape(coeffs, (num_bands, flux.freq.size(), 2)),
+            vgrp,
+            kpoints,
+            kdom,
+            cscale,
+        )
+
+    def get_eigenmode_coefficients_multi(
+        self,
+        flux: DftFlux,
+        dp_list: List[DiffractedPlanewave],
+        eig_parity: int = mp.NO_PARITY,
+        eig_vol: Volume = None,
+        eig_resolution: float = 0,
+        eig_tolerance: float = 1e-12,
+        kpoint_func: Callable[[float, int], float] = None,
+        direction: int = mp.AUTOMATIC,
+    ) -> NamedTuple:
+        """
+        Batched version of get_eigenmode_coefficients for multiple DiffractedPlanewave
+        objects. Creates the MPB eigenmode solver data once and reuses it across all
+        orders, which is much faster than calling get_eigenmode_coefficients in a loop.
+
+        Returns a namedtuple with the same fields as get_eigenmode_coefficients, but
+        alpha has shape (len(dp_list), flux.nfreqs, 2).
+        """
+        if self.fields is None:
+            raise ValueError(
+                "Fields must be initialized before calling get_eigenmode_coefficients_multi"
+            )
+        if eig_vol is None:
+            eig_vol = flux.where
+        else:
+            eig_vol = self._volume_from_kwargs(vol=eig_vol)
+        if direction is None or direction == mp.AUTOMATIC:
+            direction = flux.normal_direction
+
+        num_bands = len(dp_list)
+        coeffs = np.zeros(2 * num_bands * flux.freq.size(), dtype=np.complex128)
+        vgrp = np.zeros(num_bands * flux.freq.size())
+        cscale = np.zeros(num_bands * flux.freq.size())
+
+        # Convert Python DiffractedPlanewave objects to SWIG objects
+        swig_dp_list = [bands_to_diffractedplanewave(flux.where, dp) for dp in dp_list]
+
+        kpoints, kdom = mp.get_eigenmode_coefficients_and_kpoints_multi_dp(
+            self.fields,
+            flux.swigobj,
+            eig_vol,
+            swig_dp_list,
+            eig_parity,
+            eig_resolution,
+            eig_tolerance,
+            coeffs,
+            vgrp,
+            kpoint_func,
+            cscale,
+            direction,
+        )
 
         return EigCoeffsResult(
             np.reshape(coeffs, (num_bands, flux.freq.size(), 2)),
