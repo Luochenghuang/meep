@@ -3241,6 +3241,166 @@ class Simulation:
             greencyl_tol,
         )
 
+    def get_farfields_at_points(
+        self,
+        near2far,
+        points,
+        greencyl_tol: float = 1e-3,
+        use_symmetry: bool = True,
+        symmetry_tol: float = 1e-12,
+    ):
+        r"""
+        Compute the far fields at an arbitrary list of points.
+
+        The return value is a dictionary with keys `Ex`, `Ey`, `Ez`, `Hx`, `Hy`, and
+        `Hz`. Each value is a complex NumPy array with shape (`npoints`, `nfreq`). The
+        order of the points is preserved.
+
+        If `use_symmetry` is true, points related by the simulation's `Mirror`
+        symmetries are grouped into symmetry orbits. Only one representative of each
+        orbit is evaluated with the near-to-far transformation. The fields at the other
+        points are reconstructed using the mirror phase, including the pseudovector
+        transformation of the magnetic field. Rotational symmetries are not currently
+        used. `symmetry_tol` is the absolute coordinate tolerance used to identify
+        symmetry-related points, in Meep length units.
+
+        This method currently supports symmetry reduction only in Cartesian coordinates.
+        Set `use_symmetry=False` to evaluate every point directly.
+        """
+        if symmetry_tol <= 0:
+            raise ValueError("symmetry_tol must be positive")
+
+        if isinstance(points, Vector3):
+            point_list = [points]
+        else:
+            point_list = list(points)
+            if len(point_list) == 3 and all(np.isscalar(value) for value in point_list):
+                point_list = [point_list]
+
+        def point_coordinates(point):
+            vector = point if isinstance(point, Vector3) else Vector3(*point)
+            return [vector.x, vector.y, vector.z]
+
+        try:
+            point_array = np.asarray(
+                [point_coordinates(point) for point in point_list],
+                dtype=float,
+            ).reshape(-1, 3)
+        except (TypeError, ValueError):
+            raise ValueError("points must have shape (npoints, 3)") from None
+        if not np.all(np.isfinite(point_array)):
+            raise ValueError("points must contain only finite coordinates")
+
+        mirror_symmetries = []
+        if use_symmetry:
+            mirror_symmetries = [
+                sym for sym in self.symmetries if isinstance(sym, Mirror)
+            ]
+        if self.is_cylindrical and mirror_symmetries:
+            raise ValueError(
+                "far-field point symmetry reduction is not supported in cylindrical "
+                "coordinates"
+            )
+
+        nfreqs = near2far.nfreqs
+        components = (mp.Ex, mp.Ey, mp.Ez, mp.Hx, mp.Hy, mp.Hz)
+        component_names = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+        center = np.asarray(
+            [self.geometry_center.x, self.geometry_center.y, self.geometry_center.z],
+            dtype=float,
+        )
+
+        representatives = []
+        representative_by_key = {}
+        point_orbits = []
+        for point in point_array:
+            representative = point.copy()
+            applied_symmetries = []
+            for sym in mirror_symmetries:
+                axis = int(sym.direction)
+                if representative[axis] < center[axis]:
+                    representative[axis] = 2 * center[axis] - representative[axis]
+                    applied_symmetries.append(sym)
+
+            if use_symmetry:
+                key = tuple(
+                    math.floor(float(coordinate) / symmetry_tol)
+                    for coordinate in representative
+                )
+                representative_index = None
+                for offset_x in (-1, 0, 1):
+                    for offset_y in (-1, 0, 1):
+                        for offset_z in (-1, 0, 1):
+                            candidate_index = representative_by_key.get(
+                                (
+                                    key[0] + offset_x,
+                                    key[1] + offset_y,
+                                    key[2] + offset_z,
+                                )
+                            )
+                            if candidate_index is not None and np.all(
+                                np.abs(
+                                    representatives[candidate_index] - representative
+                                )
+                                <= symmetry_tol
+                            ):
+                                representative_index = candidate_index
+                                break
+                        if representative_index is not None:
+                            break
+                    if representative_index is not None:
+                        break
+            else:
+                key = (len(point_orbits),)
+                representative_index = None
+            if representative_index is None:
+                representative_index = len(representatives)
+                representative_by_key[key] = representative_index
+                representatives.append(representative)
+            point_orbits.append((representative_index, applied_symmetries))
+
+        representative_fields = self._get_farfields_at_points_batch(
+            near2far, representatives, greencyl_tol
+        )
+
+        fields = np.empty((len(point_array), nfreqs, 6), dtype=np.complex128)
+        symmetry_phase_factors = {}
+        for point_index, (representative_index, applied_symmetries) in enumerate(
+            point_orbits
+        ):
+            point_fields = representative_fields[representative_index].copy()
+            for sym in applied_symmetries:
+                if sym.swigobj is None:
+                    raise RuntimeError(
+                        "mirror symmetry is unavailable before simulation initialization"
+                    )
+                phase_factors = symmetry_phase_factors.get(id(sym))
+                if phase_factors is None:
+                    phase_factors = np.asarray(
+                        [
+                            sym.phase * sym.swigobj.phase_shift(component, 1)
+                            for component in components
+                        ]
+                    )
+                    symmetry_phase_factors[id(sym)] = phase_factors
+                point_fields *= phase_factors
+            fields[point_index] = point_fields
+
+        return {
+            name: fields[:, :, component_index]
+            for component_index, name in enumerate(component_names)
+        }
+
+    def _get_farfields_at_points_batch(self, near2far, points, greencyl_tol):
+        """Evaluate a point batch. Accelerator backends can replace this method."""
+        return mp._get_farfields_at_points(
+            near2far.swigobj,
+            np.asarray(points, dtype=float).reshape(-1, 3),
+            self.dimensions,
+            self.is_cylindrical,
+            greencyl_tol,
+        )
+
     def get_farfields(
         self,
         near2far,

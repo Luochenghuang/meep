@@ -1376,6 +1376,11 @@ public:
   /* return an array (Ex,Ey,Ez,Hx,Hy,Hz) x Nfreq of the far fields at x */
   std::complex<double> *farfield(const vec &x, double greencyl_tol = 1e-3);
 
+  /* return point x frequency x (Ex,Ey,Ez,Hx,Hy,Hz) far fields, using one
+     collective reduction for all points */
+  std::complex<double> *farfields_at_points(const std::vector<vec> &points,
+                                            double greencyl_tol = 1e-3);
+
   /* like farfield, but requires F to be Nfreq*6 preallocated array, and
      does *not* perform the reduction over processes...an MPI allreduce
      summation by the caller is required to get the final result ... used

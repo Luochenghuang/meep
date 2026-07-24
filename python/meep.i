@@ -97,6 +97,7 @@ void display_geometric_object_info(int indentby, GEOMETRIC_OBJECT o);
 %ignore meep::eigenmode_data::fft_data_H;
 %ignore meep::eigenmode_data::fft_data_E;
 %ignore meep::eigenmode_data::H;
+%ignore meep::dft_near2far::farfields_at_points;
 
 %include "numpy.i"
 %include "std_vector.i"
@@ -349,6 +350,54 @@ PyObject *_get_farfield(meep::dft_near2far *f, const meep::vec & v, double green
     delete[] ff_arr;
 
     return res;
+}
+
+// Wrapper around meep::dft_near2far::farfields_at_points.
+PyObject *_get_farfields_at_points(meep::dft_near2far *f, PyObject *point_obj, int dimensions,
+                                   int is_cylindrical, double greencyl_tol) {
+    PyArrayObject *point_array = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROM_OTF(point_obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY));
+    if (!point_array) return NULL;
+    if (PyArray_NDIM(point_array) != 2 || PyArray_DIM(point_array, 1) != 3) {
+        Py_DECREF(point_array);
+        PyErr_SetString(PyExc_ValueError, "points must have shape (npoints, 3)");
+        return NULL;
+    }
+
+    const npy_intp num_points = PyArray_DIM(point_array, 0);
+    const double *coordinates = static_cast<const double *>(PyArray_DATA(point_array));
+    std::vector<meep::vec> points;
+    points.reserve(num_points);
+    for (npy_intp point_index = 0; point_index < num_points; ++point_index) {
+        const double *point = coordinates + 3 * point_index;
+        if (dimensions == 1) {
+            points.emplace_back(point[2]);
+        } else if (dimensions == 2 && is_cylindrical) {
+            points.emplace_back(meep::veccyl(point[0], point[2]));
+        } else if (dimensions == 2) {
+            points.emplace_back(point[0], point[1]);
+            points.back().set_direction(meep::Z, point[2]);
+        } else if (dimensions == 3) {
+            points.emplace_back(point[0], point[1], point[2]);
+        } else {
+            Py_DECREF(point_array);
+            PyErr_SetString(PyExc_ValueError, "invalid simulation dimensions");
+            return NULL;
+        }
+    }
+    Py_DECREF(point_array);
+
+    std::complex<double> *EH = f->farfields_at_points(points, greencyl_tol);
+    npy_intp output_dims[3] = {num_points, static_cast<npy_intp>(f->freq.size()), 6};
+    PyObject *result = PyArray_SimpleNew(3, output_dims, NPY_CDOUBLE);
+    if (!result) {
+        delete[] EH;
+        return NULL;
+    }
+    memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(result)), EH,
+           sizeof(std::complex<double>) * num_points * f->freq.size() * 6);
+    delete[] EH;
+    return result;
 }
 
 // Wrapper around meep::dft_near2far::get_farfields_array
@@ -649,6 +698,7 @@ void _get_eigenmode(meep::fields *f, double frequency, meep::direction d, const 
 %feature("nothreadallow") _dft_ldos_F;
 %feature("nothreadallow") _dft_ldos_ldos;
 %feature("nothreadallow") _get_farfields_array;
+%feature("nothreadallow") _get_farfields_at_points;
 %feature("nothreadallow") _get_farfield;
 %feature("nothreadallow") py_do_harminv;
 %feature("nothreadallow") _get_array_slice_dimensions;
@@ -681,6 +731,8 @@ PyObject *py_do_harminv(PyObject *vals, double dt, double f_min, double f_max, i
                      double err_thresh, double rel_amp_thresh, double amp_thresh);
 
 PyObject *_get_farfield(meep::dft_near2far *f, const meep::vec & v, double greencyl_tol);
+PyObject *_get_farfields_at_points(meep::dft_near2far *f, PyObject *point_obj, int dimensions,
+                                   int is_cylindrical, double greencyl_tol);
 PyObject *_get_farfields_array(meep::dft_near2far *n2f, const meep::volume &where, double resolution, double greencyl_tol);
 PyObject *_dft_ldos_ldos(meep::dft_ldos *f);
 PyObject *_dft_ldos_F(meep::dft_ldos *f);

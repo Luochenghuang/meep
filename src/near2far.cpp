@@ -22,6 +22,7 @@
 
 #include "meep_internals.hpp"
 #include <assert.h>
+#include <climits>
 #include "config.h"
 #include <math.h>
 
@@ -404,6 +405,24 @@ std::complex<double> *dft_near2far::farfield(const vec &x, double greencyl_tol) 
   farfield_lowlevel(EH_local, x, greencyl_tol);
   EH = new std::complex<double>[6 * Nfreq];
   sum_to_all(EH_local, EH, 6 * Nfreq);
+  delete[] EH_local;
+  return EH;
+}
+
+std::complex<double> *dft_near2far::farfields_at_points(const std::vector<vec> &points,
+                                                        double greencyl_tol) {
+  const size_t values_per_point = 6 * freq.size();
+  const size_t num_values = points.size() * values_per_point;
+  if (values_per_point && num_values / values_per_point != points.size())
+    meep::abort("far-field point array is too large");
+  if (num_values > INT_MAX / 2)
+    meep::abort("far-field point array is too large for MPI reduction");
+
+  std::complex<double> *EH_local = new std::complex<double>[num_values];
+  std::complex<double> *EH = new std::complex<double>[num_values];
+  for (size_t point_index = 0; point_index < points.size(); ++point_index)
+    farfield_lowlevel(EH_local + point_index * values_per_point, points[point_index], greencyl_tol);
+  if (num_values) sum_to_all(EH_local, EH, static_cast<int>(num_values));
   delete[] EH_local;
   return EH;
 }
